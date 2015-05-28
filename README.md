@@ -1,8 +1,6 @@
 # galera-rolling-update
+###### Command line tool that will apply a rolling update to a Galera cluster behind a MaxScale load balancer.
 
-### Command line tool that will apply a rolling update to a Galera cluster behind a MaxScale load balancer.
-
-The tool will:
 For each node in cluster (master node last)
 1. Enter maintenance mode by marking the node for maintenance in MaxScale.
 2. Remove the node from the cluster by calling `SET GLOBAL wsrep_OSU_method='RSU'`, then `SET GLOBAL wsrep_cluster_address="gcomm://"`
