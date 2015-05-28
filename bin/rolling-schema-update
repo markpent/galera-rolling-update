@@ -1,0 +1,486 @@
+#!/usr/bin/env ruby
+
+
+require 'optparse'
+require 'pathname'
+require 'rubygems'
+require 'mysql'
+require 'yaml'
+
+
+# default options
+OPTIONS = {
+  :config => '/etc/rolling_schema_update.conf',
+  :maxadmin=>'/usr/local/mariadb-maxscale/bin/maxadminx',
+  :maxpwd=>'mariadb',
+  :maxhost=>'127.0.0.1',
+  :dbusername=>'root',
+  :dbpassword=>'', 
+  :database=>'',
+  :cluster=>'',
+  :sql=>nil,
+  :verbose=>false,
+  :resync=>false
+}
+
+def putsnl(msg)
+  $stdout.write msg
+  $stdout.flush
+end
+
+class Server
+  def self.parse(status)
+    lines = status.split("\n")
+    
+    servers = []
+    for line in lines
+      if line[0,1] != "\t"
+        cur_server = Server.new(line)
+        servers << cur_server
+      elsif !cur_server.nil?
+        line = line.squeeze("\t").split("\t")
+        #puts line.inspect
+        
+        key = line[1]
+        value = line[2]
+        #cleanup key
+        pos = key.index(':')
+        next if pos.nil?
+        key = key[0,pos]
+        cur_server.set_property(key, value)
+      end
+      
+    end
+    servers
+  end
+  
+  attr_accessor :name
+  
+  def initialize(line)
+    pos1= line.index("(")
+    pos2 = line.index(")")
+    if pos2 > pos1 && pos1 > 10
+      @name = line[pos1 + 1, (pos2 - pos1 - 1)]
+      #puts "name=#{@name}"
+    else
+      raise "Invalid server status line: #{line}"
+    end
+    @properties = {}
+    @statuses = ['Unknown']
+  end
+  
+  def set_property(name, value)
+    if name == 'Status'
+      @statuses = value.split(",").collect { |s| s.strip }
+    else
+      @properties[name] = value
+    end
+  end
+  
+  def status
+    @statuses.join(', ')
+  end
+  
+  def valid?
+    @statuses.include?('Synced')
+  end
+  
+  def master?
+    @statuses.include?('Master')
+  end
+  
+  def in_maintenance?
+    @statuses.include?('Maintenance')
+  end
+  
+  def to_s
+    "#{@name} (#{status})"
+  end
+  
+  def test_connection
+    con = nil
+    begin
+      con = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+      rs = con.query 'SELECT VERSION()'
+    rescue Mysql::Error => e
+      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+      exit
+    ensure
+      con.close if con 
+    end
+  end
+  
+  def enter_maintenance
+    putsnl "#{@name}: entering maintenance mode.."
+    #take the server out of maxscale 
+    result = `#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} set server #{@name} maint`
+    if $?.to_i != 0
+      puts "Failed to move server #{@name} into maintenance mode using command '#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} set server #{@name} maint'"
+      exit
+    end
+    @statuses << 'Maintenance'
+    @statuses.uniq!
+    #sleep to give maxScale a chance to re-poll servers and re-assign roles
+    sleep(1.5)
+    puts "done"
+  end
+  
+  def leave_maintenance
+    putsnl "#{@name}: leaving maintenance mode.."
+    #take the server out of maxscale 
+    result = `#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} clear server #{@name} maint`
+    if $?.to_i != 0
+      puts "Failed to move server #{@name} into maintenance mode using command '#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} clear server #{@name} maint'"
+      exit
+    end
+    @statuses.delete('Maintenance')
+    #sleep to give maxScale a chance to re-poll servers and re-assign roles
+    sleep(1.5)
+    puts "done"
+  end
+  
+  
+  def desync
+    putsnl "#{@name}: isolating from cluster.."
+
+    
+    connection = nil
+    begin
+      connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+    rescue Mysql::Error => e
+      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+      exit
+    end
+    putsnl '.'
+    begin
+      connection.query "SET GLOBAL wsrep_OSU_method='RSU'"
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
+      exit
+    end
+    putsnl '.'
+    begin
+      connection.query 'SET GLOBAL wsrep_cluster_address="gcomm://"'
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_cluster_address=gcomm:// : #{e.message}"
+      exit
+    end
+    connection.close
+    sleep 2
+    puts "done"
+  end
+  
+  def resync
+    putsnl "#{@name}: rejoining cluster.."
+  
+    connection = nil
+    begin
+      connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+    rescue Mysql::Error => e
+      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+      exit
+    end
+
+    
+    begin
+      connection.query "SET GLOBAL wsrep_cluster_address=\"#{OPTIONS[:cluster]}\""
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_cluster_address=#{OPTIONS[:cluster]} : #{e.message}"
+      exit
+    end
+    putsnl '.'
+    begin
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      connection.query "SET GLOBAL wsrep_OSU_method='TOI'" if cur_val != 'TOI'
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
+      exit
+    end
+    
+    #now we need to wait until the wsrep_local_state = 4
+    in_sync = false
+    while !in_sync
+      rs = nil
+      begin
+        rs = connection.query "SHOW STATUS LIKE 'wsrep_local_state'"
+      rescue Mysql::Error => e
+        puts "Error occured getting wsrep_local_state : #{e.message}"
+        exit
+      end
+      begin
+        row = rs.fetch_row
+        if row[1].to_i == 4
+          in_sync = true
+        else
+          putsnl '.'
+          sleep(1)
+        end
+      rescue Mysql::Error => e
+        puts "Error occured getting wsrep_local_state : #{e.message}"
+        exit
+      end
+    end
+    connection.close
+    sleep 2
+    puts "done"
+  end
+  
+  def execute(statements)
+    putsnl "#{@name}: executing"
+    
+    connection = nil
+    begin
+      connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+    rescue Mysql::Error => e
+      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+      exit
+    end
+    
+   # puts "wsrep_reject_queries=" + connection.query("SHOW VARIABLES LIKE 'wsrep_reject_queries'").fetch_row[1].to_s
+   # puts "wsrep_sst_donor_rejects_queries=" + connection.query("SHOW VARIABLES LIKE 'wsrep_sst_donor_rejects_queries'").fetch_row[1].to_s
+    
+    
+    puts '' if OPTIONS[:verbose]
+    for statement in statements
+      puts statement if OPTIONS[:verbose]
+      retry_sql = true
+      retried = false
+      while retry_sql
+        begin
+          retry_sql = false
+          connection.query statement
+          putsnl '.' unless OPTIONS[:verbose]
+          puts "retry successed" if retried
+        rescue Mysql::Error => e
+          puts "Error occured executing #{statement} : #{e.message}"
+          if e.errno == 1047
+            retry_sql = true
+            puts "retrying..."
+            retried = true
+            sleep 1
+          else
+            exit
+          end
+        end
+      end
+    end
+    
+    connection.close
+    puts "done" unless OPTIONS[:verbose]
+  end
+  
+end
+
+
+class Statements
+  
+  attr_accessor :rolling_statements
+  attr_accessor :execute_once
+
+  def initialize(script_data)
+    
+    @rolling_statements = []
+    @execute_once = []
+    
+    statements = script_data.split(";").collect { |statement| statement.strip }
+    
+    began_execute_once = false
+    for statement in statements
+      if statement[0,1] == '#' #its a comment... lets move to a line thats not a comment
+        s_lines = statement.split("\n")
+        statement_lines = []
+        for s_line in s_lines
+          if s_line[0,1] == '#'
+            if s_line.upcase.index('#EXECUTE ONCE') == 0
+              began_execute_once = true
+            end
+          else
+            statement_lines << s_line
+          end
+        end
+        statement = statement_lines.join("\n")
+      end
+      
+      if began_execute_once
+        @execute_once << statement unless statement.strip.length == 0
+      else
+        @rolling_statements << statement unless statement.strip.length == 0
+      end
+    end
+    
+  end
+  
+end
+
+
+set_vars = {}
+OPTIONS.keys.each { |k| set_vars["#{k}_set".intern] = false }
+
+ARGV.options do |o|
+  script_name = File.basename($0)
+  
+  o.set_summary_indent('  ')
+  o.banner =    "Usage: #{script_name} [options]"
+  o.define_head "Apply a rolling schema update"
+  o.separator   ""
+  
+  o.on("-c", "--config [filename]", String,
+       "A configuration file (YAML)",
+       "Default: #{OPTIONS[:config]}")   { |x| OPTIONS[:config] = x; set_vars[:config_set] = true }
+  o.on("-a", "--cluster [addresses]", String,
+       "The wsrep_cluster_address (gcomm://XXX,YYY..)")   { |x| OPTIONS[:cluster] = x; set_vars[:cluster_set] = true }
+  o.on("-m", "--maxadmin [path]", String,
+       "The path to the maxadmin binary",
+       "Default: #{OPTIONS[:maxadmin]}") { |x| OPTIONS[:maxadmin] = x; set_vars[:maxadmin_set] = true  }
+  o.on("-x", "--maxpwd [string]", String,
+       "The maxadmin password",
+	   "Default: #{OPTIONS[:maxpwd]}") { |x| OPTIONS[:maxpwd] = x; set_vars[:maxpwd_set] = true   }
+  o.on("-H", "--maxhost [string]", String,
+       "The maxScale host",
+	   "Default: #{OPTIONS[:maxhost]}") { |x| OPTIONS[:maxhost] = x; set_vars[:maxhost_set] = true   }
+  o.on("-u", "--dbusername [string]", String,
+       "The common database username used to apply schema statements",
+       "Default: #{OPTIONS[:dbusername]}")   { |x| OPTIONS[:dbusername] = x; set_vars[:dbusername_set] = true  }
+  o.on("-p", "--dbpassword [string]", String,
+       "The common database password used to apply schema statements",
+       "Default: #{OPTIONS[:dbpassword]}")   { |x| OPTIONS[:dbpassword] = x; set_vars[:dbpassword_set] = true  }
+  o.on("-d", "--database [string]", String,
+       "The database to apply the statements against")   { |x| OPTIONS[:database] = x; set_vars[:database_set] = true  }
+  o.on("-s", "--sql [path]", String,
+       "A path to a sql script file containing the schema statements")   { |x| OPTIONS[:sql] = x; set_vars[:sql_set] = true  }
+  o.on("-v", "--verbose", 
+       "Add verbose output")   { OPTIONS[:verbose] = true ; set_vars[:verbose_set] = true  }
+  o.on("-r", "--resync", 
+       "Reset all 'sync' flags so all servers are syncing")   { OPTIONS[:resync] = true }
+  o.separator ""
+
+  o.on_tail("-h", "--help", "Show this help message.") { puts o; exit }
+  
+  o.parse!
+end
+
+file_config = nil
+if OPTIONS[:config] && File.exist?(OPTIONS[:config])
+  begin
+    file_config = YAML.load_file(OPTIONS[:config])
+  rescue Exception=>e
+    puts "Error loading config from #{OPTIONS[:config]}: #{e.message}"
+    exit
+  end
+end
+#puts file_config.inspect
+unless file_config.nil?
+  for k in file_config.keys
+    unless set_vars["#{k}_set".intern] == true
+      OPTIONS[k] = file_config[k]
+    end
+  end
+end
+
+if OPTIONS[:verbose]
+  puts "************\nSettings:\n" + OPTIONS.collect { |k,v| "#{k}:#{v}"}.join("\n") + "\n************\n\n\n"
+end
+
+
+#make sure required settings are set....
+if OPTIONS[:cluster].nil? || OPTIONS[:cluster].strip.length == 0 
+  puts "Missing cluster address (--cluster)"
+  exit
+end
+
+
+if OPTIONS[:maxadmin].nil? || !File.exist?(OPTIONS[:maxadmin])
+  puts "Missing maxadmin binary --maxadmin (#{OPTIONS[:maxadmin]})"
+  exit
+end
+
+if OPTIONS[:maxpwd].nil? || OPTIONS[:maxpwd].strip.length == 0 
+  puts "Missing maxadmin password (--maxpwd)"
+  exit
+end
+
+if OPTIONS[:dbusername].nil? || OPTIONS[:dbusername].strip.length == 0 
+  puts "Missing database username (--dbusername)"
+  exit
+end
+
+if OPTIONS[:dbpassword].nil? || OPTIONS[:dbpassword].strip.length == 0 
+  puts "Missing database password (--dbpassword)"
+  exit
+end
+
+if OPTIONS[:database].nil? || OPTIONS[:database].strip.length == 0 
+  puts "Missing db (--database)"
+  exit
+end
+
+if OPTIONS[:sql].nil? || !File.exist?(OPTIONS[:sql])
+  puts "Missing sql schema script --sql (#{OPTIONS[:sql]})"
+  exit
+end
+
+#test we can access the maxadmin binary and get a list of servers...
+puts "Getting list of servers.." if OPTIONS[:verbose]
+
+
+result = `#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} show servers`
+if $?.to_i != 0
+  puts "Failed to get server list from maxadmin binary when running command '#{OPTIONS[:maxadmin]} -p #{OPTIONS[:maxpwd]} -h #{OPTIONS[:maxhost]} show servers'"
+  exit
+end
+
+
+  
+servers = Server.parse(result)
+puts servers.collect { |s| s.to_s }.join(", ") if OPTIONS[:verbose]
+
+#make sure all the servers are valid...
+all_valid = true
+for server in servers
+  unless server.valid?
+    puts "Unable to continue: #{server.to_s}" unless OPTIONS[:resync]
+    all_valid = false
+  end
+  server.test_connection
+  server.leave_maintenance if server.in_maintenance?
+  server.resync if OPTIONS[:resync]
+end
+exit unless all_valid
+exit if OPTIONS[:resync]
+
+#lets load the script...
+script_data = nil
+begin
+  script_data = File.open(OPTIONS[:sql], "r") { |f| f.read }
+rescue Exception=>e
+  puts "Error loading sql script from #{OPTIONS[:sql]}: #{e.message}"
+  exit
+end
+
+statements = Statements.new(script_data)
+
+puts statements.rolling_statements.inspect
+
+#sort servers so master is last
+servers.sort! { |a, b| 
+  if a.master?
+    1
+  elsif b.master?
+    -1
+  else
+    0
+  end
+}
+
+for server in servers
+  puts "************************************************\nUpdating #{server.name}\n************************************************"
+  begin
+    server.enter_maintenance
+    server.desync
+    server.execute statements.rolling_statements
+    server.resync
+    server.leave_maintenance
+  ensure
+    
+  end
+end

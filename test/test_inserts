@@ -1,0 +1,80 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'rubygems'
+require 'mysql'
+
+#a simple test tool that will add records to a database.
+#run this tool while doing schema updates to the test_galera_updates table to test the rolling update
+
+
+# default options
+OPTIONS = {
+  :host=>'127.0.0.1', 
+  :port=>3306,
+  :username=>'dbuser',
+  :password=>'dbpass',   
+  :database=>'',
+  :count=>10000
+}
+
+ARGV.options do |o|
+  script_name = File.basename($0)
+  
+  o.set_summary_indent('  ')
+  o.banner =    "Usage: #{script_name} [options]"
+  o.define_head "Test rolling updates"
+  o.separator   ""
+  
+ 
+  o.on("-H", "--host [string]", String,
+       "The database host",
+	   "Default: #{OPTIONS[:host]}") { |x| OPTIONS[:host] = x }
+	o.on("-P", "--port [number]", Integer,
+       "The database port",
+	   "Default: #{OPTIONS[:port]}") { |x| OPTIONS[:port] = x.to_i }
+  o.on("-u", "--username [string]", String,
+       "The database username",
+       "Default: #{OPTIONS[:username]}")   { |x| OPTIONS[:username] = x }
+  o.on("-p", "--password [string]", String,
+       "The database password",
+       "Default: #{OPTIONS[:password]}")   { |x| OPTIONS[:password] = x }
+  o.on("-d", "--database [string]", String,
+       "The database to apply the test against")   { |x| OPTIONS[:database] = x  }
+  o.on("-c", "--count [number]", Integer,
+       "the number of rows to insert")   { |x| OPTIONS[:count] = x }
+  o.separator ""
+
+  o.on_tail("-h", "--help", "Show this help message.") { puts o; exit }
+  
+  o.parse!
+end
+
+$stdout.write "Adding #{OPTIONS[:count]} rows"
+$stdout.flush
+data_to_insert = "A" * 10000
+
+con = nil
+begin
+  con = Mysql.new OPTIONS[:host], OPTIONS[:username], OPTIONS[:password], OPTIONS[:database], OPTIONS[:port]
+  
+  con.query "CREATE TABLE IF NOT EXISTS test_galera_updates (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `value` LONGTEXT NULL,
+  PRIMARY KEY (`id`))"
+  
+  for i in 0...OPTIONS[:count]
+    con.query "insert into test_galera_updates(value) values('#{i}_#{data_to_insert}')"
+    sleep 0.01
+    if i % 100 == 0
+      $stdout.write('.')
+      $stdout.flush
+    end
+  end
+  puts "done"
+rescue Mysql::Error => e
+  puts "Database Error running test: #{e.error}"
+  exit
+ensure
+  con.close if con 
+end
