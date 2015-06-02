@@ -466,7 +466,7 @@ end
 
 statements = Statements.new(script_data)
 
-puts statements.rolling_statements.inspect
+puts statements.rolling_statements.join("\n")
 
 #sort servers so master is last
 servers.sort! { |a, b| 
@@ -506,6 +506,11 @@ begin
     ensure
       
     end
+  end
+  unless statements.execute_once.empty?
+    puts "************************************************\nExecuting Once on #{servers.first.name}\n************************************************"
+    puts statements.execute_once.join("\n")
+    servers.first.execute statements.execute_once
   end
 ensure
   unless memcache_server.nil?
