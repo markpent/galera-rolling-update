@@ -6,7 +6,7 @@ require 'pathname'
 require 'rubygems'
 require 'mysql'
 require 'yaml'
-
+require 'memcache'
 
 # default options
 OPTIONS = {
@@ -20,7 +20,9 @@ OPTIONS = {
   :cluster=>'',
   :sql=>nil,
   :verbose=>false,
-  :resync=>false
+  :resync=>false,
+  :memcache_servers=>nil,
+  :memcache_key=>nil
 }
 
 def putsnl(msg)
@@ -352,6 +354,11 @@ ARGV.options do |o|
        "Add verbose output")   { OPTIONS[:verbose] = true ; set_vars[:verbose_set] = true  }
   o.on("-r", "--resync", 
        "Reset all 'sync' flags so all servers are syncing")   { OPTIONS[:resync] = true }
+  o.on("-e", "--memcache_servers [string]", String,
+       "The memcache server to set the 'migrating' flag")   { |x| OPTIONS[:memcache_servers] = x; set_vars[:memcache_servers_set] = true  }
+  o.on("-k", "--memcache_key [string]", String,
+       "The memcache key to set the 'migrating' flag")   { |x| OPTIONS[:memcache_key] = x; set_vars[:memcache_key_set] = true  }
+
   o.separator ""
 
   o.on_tail("-h", "--help", "Show this help message.") { puts o; exit }
@@ -472,15 +479,37 @@ servers.sort! { |a, b|
   end
 }
 
-for server in servers
-  puts "************************************************\nUpdating #{server.name}\n************************************************"
-  begin
-    server.enter_maintenance
-    server.desync
-    server.execute statements.rolling_statements
-    server.resync
-    server.leave_maintenance
-  ensure
-    
+memcache_server = nil
+unless OPTIONS[:memcache_servers].nil? || OPTIONS[:memcache_key].nil?
+  memcache_options = {
+     :compression => true,
+     :debug => true,
+     :namespace => nil,
+     :readonly => false,
+     :urlencode => false
+  }
+  memcache_server = MemCache.new(memcache_options)
+  memcache_server.servers = OPTIONS[:memcache_servers].split(";")
+  puts "Setting memcache key #{OPTIONS[:memcache_key]}"
+  memcache_server.add(OPTIONS[:memcache_key], true)
+end
+
+begin
+  for server in servers
+    puts "************************************************\nUpdating #{server.name}\n************************************************"
+    begin
+      server.enter_maintenance
+      server.desync
+      server.execute statements.rolling_statements
+      server.resync
+      server.leave_maintenance
+    ensure
+      
+    end
+  end
+ensure
+  unless memcache_server.nil?
+    puts "Removing memcache key #{OPTIONS[:memcache_key]}"
+    memcache_server.delete(OPTIONS[:memcache_key])
   end
 end
