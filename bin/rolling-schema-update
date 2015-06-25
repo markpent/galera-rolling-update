@@ -14,6 +14,7 @@ OPTIONS = {
   :maxadmin=>'/usr/local/mariadb-maxscale/bin/maxadminx',
   :maxpwd=>'mariadb',
   :maxhost=>'127.0.0.1',
+  :mode=>'desync',
   :dbusername=>'root',
   :dbpassword=>'', 
   :database=>'',
@@ -147,9 +148,16 @@ class Server
     puts "done"
   end
   
-  
   def desync
-    putsnl "#{@name}: isolating from cluster.."
+    if OPTIONS[:mode] == "drop"
+      desync_drop
+    else
+      desync_desync
+    end
+  end
+  
+  def desync_drop
+    putsnl "#{@name}: isolating from cluster (drop).."
 
     
     connection = nil
@@ -178,8 +186,55 @@ class Server
     puts "done"
   end
   
+  def desync_desync
+    putsnl "#{@name}: isolating from cluster (desync).."
+
+    connection = nil
+    begin
+      connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+    rescue Mysql::Error => e
+      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+      exit
+    end
+    @connection = connection
+    putsnl '.'
+    begin
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      connection.query "SET GLOBAL wsrep_OSU_method='RSU'" if cur_val != 'RSU'
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
+      exit
+    end
+    putsnl '.'
+#    begin
+#      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_desync'").fetch_row[1]
+#      connection.query 'SET GLOBAL wsrep_desync=ON' if cur_val != 'ON'
+#    rescue Mysql::Error => e
+#      puts "Error occured setting GLOBAL wsrep_desync=ON : #{e.message}"
+#      exit
+#    end
+#    putsnl '.'
+#    begin
+#      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_on'").fetch_row[1]
+#      connection.query 'SET wsrep_on=OFF' if cur_val != 'OFF'
+#    rescue Mysql::Error => e
+#      puts "Error occured setting SET wsrep_on=OFF : #{e.message}"
+#      exit
+#    end
+    sleep 2
+    puts "done"
+  end
+  
   def resync
-    putsnl "#{@name}: rejoining cluster.."
+    if OPTIONS[:mode] == "drop"
+      resync_drop
+    else
+      resync_desync
+    end
+  end
+  
+  def resync_drop
+    putsnl "#{@name}: rejoining cluster (drop).."
   
     connection = nil
     begin
@@ -188,7 +243,7 @@ class Server
       puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
       exit
     end
-
+   
     
     begin
       connection.query "SET GLOBAL wsrep_cluster_address=\"#{OPTIONS[:cluster]}\""
@@ -233,16 +288,77 @@ class Server
     puts "done"
   end
   
+  def resync_desync
+    putsnl "#{@name}: rejoining cluster (desync).."
+    
+    connection = @connection
+
+#    begin
+#      connection.query "SET wsrep_on=ON"
+#    rescue Mysql::Error => e
+#      puts "Error occured setting wsrep_on=ON : #{e.message}"
+#      exit
+#    end
+#    putsnl '.'
+#    begin
+#      connection.query "SET GLOBAL wsrep_desync=OFF"
+#    rescue Mysql::Error => e
+#      puts "Error occured setting GLOBAL wsrep_desync=OFF : #{e.message}"
+#      exit
+#    end
+#    putsnl '.'
+    begin
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      connection.query "SET GLOBAL wsrep_OSU_method='TOI'" if cur_val != 'TOI'
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
+      exit
+    end
+    
+    #now we need to wait until the wsrep_local_state = 4
+    in_sync = false
+    while !in_sync
+      rs = nil
+      begin
+        rs = connection.query "SHOW STATUS LIKE 'wsrep_local_state'"
+      rescue Mysql::Error => e
+        puts "Error occured getting wsrep_local_state : #{e.message}"
+        exit
+      end
+      begin
+        row = rs.fetch_row
+        if row[1].to_i == 4
+          in_sync = true
+        else
+          putsnl '.'
+          sleep(1)
+        end
+      rescue Mysql::Error => e
+        puts "Error occured getting wsrep_local_state : #{e.message}"
+        exit
+      end
+    end
+    connection.close
+    sleep 2
+    puts "done"
+  end
+  
   def execute(statements)
     putsnl "#{@name}: executing"
     
-    connection = nil
-    begin
-      connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
-    rescue Mysql::Error => e
-      puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
-      exit
+    if OPTIONS[:mode] == "drop"
+      connection = nil
+      begin
+        connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
+      rescue Mysql::Error => e
+        puts "Unable to connect to #{@properties['Server']} (#{@name}): #{e.error}"
+        exit
+      end
+    else
+      connection = @connection
     end
+    
+    
     
    # puts "wsrep_reject_queries=" + connection.query("SHOW VARIABLES LIKE 'wsrep_reject_queries'").fetch_row[1].to_s
    # puts "wsrep_sst_donor_rejects_queries=" + connection.query("SHOW VARIABLES LIKE 'wsrep_sst_donor_rejects_queries'").fetch_row[1].to_s
@@ -273,7 +389,9 @@ class Server
       end
     end
     
-    connection.close
+    if OPTIONS[:mode] == "drop"
+      connection.close
+    end
     puts "done" unless OPTIONS[:verbose]
   end
   
@@ -352,6 +470,9 @@ ARGV.options do |o|
   o.on("-p", "--dbpassword [string]", String,
        "The common database password used to apply schema statements",
        "Default: #{OPTIONS[:dbpassword]}")   { |x| OPTIONS[:dbpassword] = x; set_vars[:dbpassword_set] = true  }
+  o.on("-M", "--mode [mode]", String,
+       "The mode to remove node from cluster while DDL is applied (desync or drop)",
+       "Default: #{OPTIONS[:mode]}") { |x| OPTIONS[:mode] = x; set_vars[:mode_set] = true  }
   o.on("-d", "--database [string]", String,
        "The database to apply the statements against")   { |x| OPTIONS[:database] = x; set_vars[:database_set] = true  }
   o.on("-s", "--sql [path]", String,
