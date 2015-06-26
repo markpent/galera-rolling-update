@@ -200,7 +200,12 @@ class Server
     putsnl '.'
     begin
       cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
-      connection.query "SET GLOBAL wsrep_OSU_method='RSU'" if cur_val != 'RSU'
+      if cur_val != 'RSU'
+        puts "Setting RSU.." if OPTIONS[:verbose]
+        connection.query "SET GLOBAL wsrep_OSU_method='RSU'"
+      else
+        puts "Not setting RSU: already using RSU"
+      end
     rescue Mysql::Error => e
       puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
       exit
@@ -309,7 +314,12 @@ class Server
 #    putsnl '.'
     begin
       cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
-      connection.query "SET GLOBAL wsrep_OSU_method='TOI'" if cur_val != 'TOI'
+      if cur_val != 'TOI'
+        puts "Setting TOI.." if OPTIONS[:verbose]
+        connection.query "SET GLOBAL wsrep_OSU_method='TOI'"
+      else
+        puts "Not setting TOI: already using TOI"
+      end
     rescue Mysql::Error => e
       puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
       exit
