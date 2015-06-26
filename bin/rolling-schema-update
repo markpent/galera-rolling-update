@@ -199,10 +199,10 @@ class Server
     @connection = connection
     putsnl '.'
     begin
-      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'RSU'
         puts "Setting RSU.." if OPTIONS[:verbose]
-        connection.query "SET GLOBAL wsrep_OSU_method='RSU'"
+        connection.query "SET wsrep_OSU_method='RSU'"
       else
         puts "Not setting RSU: already using RSU"
       end
@@ -313,10 +313,10 @@ class Server
 #    end
 #    putsnl '.'
     begin
-      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'TOI'
         puts "Setting TOI.." if OPTIONS[:verbose]
-        connection.query "SET GLOBAL wsrep_OSU_method='TOI'"
+        connection.query "SET wsrep_OSU_method='TOI'"
       else
         puts "Not setting TOI: already using TOI"
       end
