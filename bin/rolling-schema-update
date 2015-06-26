@@ -199,12 +199,24 @@ class Server
     @connection = connection
     putsnl '.'
     begin
-      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'RSU'
         puts "Setting RSU.." if OPTIONS[:verbose]
-        connection.query "SET wsrep_OSU_method='RSU'"
+        connection.query "SET GLOBAL wsrep_OSU_method='RSU'"
       else
         puts "Not setting RSU: already using RSU"
+      end
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
+      exit
+    end
+    putsnl '.'
+    #some versions seem to allow local wsrep_OSU_method variable...
+    begin
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      if cur_val != 'RSU'
+        puts "Setting local RSU.."
+        connection.query "SET wsrep_OSU_method='RSU'"
       end
     rescue Mysql::Error => e
       puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
@@ -313,15 +325,26 @@ class Server
 #    end
 #    putsnl '.'
     begin
-      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'TOI'
         puts "Setting TOI.." if OPTIONS[:verbose]
-        connection.query "SET wsrep_OSU_method='TOI'"
+        connection.query "SET GLOBAL wsrep_OSU_method='TOI'"
       else
         puts "Not setting TOI: already using TOI"
       end
     rescue Mysql::Error => e
       puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
+      exit
+    end
+    putsnl '.'
+    begin
+      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      if cur_val != 'TOI'
+        puts "Setting Local TOI.."
+        connection.query "SET wsrep_OSU_method='TOI'"
+      end
+    rescue Mysql::Error => e
+      puts "Error occured setting local wsrep_OSU_method='TOI' : #{e.message}"
       exit
     end
     
