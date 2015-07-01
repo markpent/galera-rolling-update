@@ -409,8 +409,8 @@ class Server
           putsnl '.' unless OPTIONS[:verbose]
           puts "retry successed" if retried
         rescue Mysql::Error => e
-          puts "Error occured executing #{statement} : #{e.message}"
-          if e.errno == 1047
+          puts "Error occured (#{e.errno}) executing #{statement} : #{e.message}"
+          if e.errno == 1047 || e.errno == 1213 # 'Unknown command' and 'deadlock'
             retry_sql = true
             puts "retrying..."
             retried = true
