@@ -383,7 +383,7 @@ class Server
   def execute(statements)
     putsnl "#{@name}: executing"
     
-    if OPTIONS[:mode] == "drop"
+    if OPTIONS[:mode] == "drop" || @connection.nil?
       connection = nil
       begin
         connection = Mysql.new @properties['Server'], OPTIONS[:dbusername], OPTIONS[:dbpassword], OPTIONS[:database]
@@ -407,7 +407,7 @@ class Server
       execute_with_retry(connection, statement)
     end
     
-    if OPTIONS[:mode] == "drop"
+    if OPTIONS[:mode] == "drop" || @connection.nil?
       connection.close
     end
     puts "done" unless OPTIONS[:verbose]
