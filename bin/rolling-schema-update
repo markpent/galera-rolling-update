@@ -23,7 +23,8 @@ OPTIONS = {
   :verbose=>false,
   :resync=>false,
   :memcache_servers=>nil,
-  :memcache_key=>nil
+  :memcache_key=>nil,
+  :skip=>nil
 }
 
 def putsnl(msg)
@@ -199,10 +200,10 @@ class Server
     @connection = connection
     putsnl '.'
     begin
-      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = execute_with_retry(connection, "SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'RSU'
         puts "Setting RSU.." if OPTIONS[:verbose]
-        connection.query "SET GLOBAL wsrep_OSU_method='RSU'"
+        execute_with_retry(connection, "SET GLOBAL wsrep_OSU_method='RSU'")
       else
         puts "Not setting RSU: already using RSU"
       end
@@ -213,10 +214,10 @@ class Server
     putsnl '.'
     #some versions seem to allow local wsrep_OSU_method variable...
     begin
-      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = execute_with_retry(connection,"SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'RSU'
         puts "Setting local RSU.."
-        connection.query "SET wsrep_OSU_method='RSU'"
+        execute_with_retry(connection, "SET wsrep_OSU_method='RSU'")
       end
     rescue Mysql::Error => e
       puts "Error occured setting wsrep_OSU_method='RSU' : #{e.message}"
@@ -325,10 +326,10 @@ class Server
 #    end
 #    putsnl '.'
     begin
-      cur_val = connection.query("SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = execute_with_retry(connection,"SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'TOI'
         puts "Setting TOI.." if OPTIONS[:verbose]
-        connection.query "SET GLOBAL wsrep_OSU_method='TOI'"
+        execute_with_retry(connection,"SET GLOBAL wsrep_OSU_method='TOI'")
       else
         puts "Not setting TOI: already using TOI"
       end
@@ -338,10 +339,10 @@ class Server
     end
     putsnl '.'
     begin
-      cur_val = connection.query("SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      cur_val = execute_with_retry(connection, "SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
       if cur_val != 'TOI'
         puts "Setting Local TOI.."
-        connection.query "SET wsrep_OSU_method='TOI'"
+        execute_with_retry(connection,"SET wsrep_OSU_method='TOI'")
       end
     rescue Mysql::Error => e
       puts "Error occured setting local wsrep_OSU_method='TOI' : #{e.message}"
@@ -353,7 +354,7 @@ class Server
     while !in_sync
       rs = nil
       begin
-        rs = connection.query "SHOW STATUS LIKE 'wsrep_local_state'"
+        rs = execute_with_retry(connection, "SHOW STATUS LIKE 'wsrep_local_state'")
       rescue Mysql::Error => e
         puts "Error occured getting wsrep_local_state : #{e.message}"
         exit
@@ -400,32 +401,37 @@ class Server
     puts '' if OPTIONS[:verbose]
     for statement in statements
       puts statement if OPTIONS[:verbose]
-      retry_sql = true
-      retried = false
-      while retry_sql
-        begin
-          retry_sql = false
-          connection.query statement
-          putsnl '.' unless OPTIONS[:verbose]
-          puts "retry successed" if retried
-        rescue Mysql::Error => e
-          puts "Error occured (#{e.errno}) executing #{statement} : #{e.message}"
-          if e.errno == 1047 || e.errno == 1213 # 'Unknown command' and 'deadlock'
-            retry_sql = true
-            puts "retrying..."
-            retried = true
-            sleep 1
-          else
-            exit
-          end
-        end
-      end
+      execute_with_retry(connection, statement)
     end
     
     if OPTIONS[:mode] == "drop"
       connection.close
     end
     puts "done" unless OPTIONS[:verbose]
+  end
+  
+  def execute_with_retry(connection, statement)
+    retry_sql = true
+    retried = false
+    while retry_sql
+      begin
+        retry_sql = false
+        result = connection.query statement
+        puts "retry successed" if retried
+        return result
+      rescue Mysql::Error => e
+        puts "Error occured (#{e.errno}) executing #{statement} : #{e.message}"
+        if e.errno == 1047 || e.errno == 1213 # 'Unknown command' and 'deadlock'
+          retry_sql = true
+          puts "retrying..."
+          retried = true
+          sleep 1
+        else
+          exit
+        end
+      end
+    end
+    nil
   end
   
 end
@@ -510,6 +516,8 @@ ARGV.options do |o|
        "The database to apply the statements against")   { |x| OPTIONS[:database] = x; set_vars[:database_set] = true  }
   o.on("-s", "--sql [path]", String,
        "A path to a sql script file containing the schema statements")   { |x| OPTIONS[:sql] = x; set_vars[:sql_set] = true  }
+  o.on("-i", "--skip [servers]", String,
+       "A comma separated list of servers to skip")   { |x| OPTIONS[:skip] = x; set_vars[:skip_set] = true  }
   o.on("-v", "--verbose", 
        "Add verbose output")   { OPTIONS[:verbose] = true ; set_vars[:verbose_set] = true  }
   o.on("-r", "--resync", 
@@ -586,6 +594,13 @@ if OPTIONS[:sql].nil? || !File.exist?(OPTIONS[:sql])
   exit
 end
 
+if OPTIONS[:skip].nil?
+  OPTIONS[:skip] = []
+else
+  OPTIONS[:skip] = OPTIONS[:skip].split(",")
+  puts "Skipping servers #{OPTIONS[:skip].inspect}"
+end
+
 #test we can access the maxadmin binary and get a list of servers...
 puts "Getting list of servers.." if OPTIONS[:verbose]
 
@@ -604,7 +619,7 @@ puts servers.collect { |s| s.to_s }.join(", ") if OPTIONS[:verbose]
 #make sure all the servers are valid...
 all_valid = true
 for server in servers
-  unless server.valid?
+  unless server.valid? 
     puts "Unable to continue: #{server.to_s}" unless OPTIONS[:resync]
     all_valid = false
   end
@@ -656,15 +671,19 @@ end
 
 begin
   for server in servers
-    puts "************************************************\nUpdating #{server.name}\n************************************************"
-    begin
-      server.enter_maintenance
-      server.desync
-      server.execute statements.rolling_statements
-      server.resync
-      server.leave_maintenance
-    ensure
-      
+    if OPTIONS[:skip].include?(server.name)
+      puts "Skipping #{server.name}"
+    else
+      puts "************************************************\nUpdating #{server.name}\n************************************************"
+      begin
+        server.enter_maintenance
+        server.desync
+        server.execute statements.rolling_statements
+        server.resync
+        server.leave_maintenance
+      ensure
+        
+      end
     end
   end
   unless statements.execute_once.empty?
