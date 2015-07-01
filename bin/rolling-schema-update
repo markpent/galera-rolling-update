@@ -325,29 +325,7 @@ class Server
 #      exit
 #    end
 #    putsnl '.'
-    begin
-      cur_val = execute_with_retry(connection,"SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
-      if cur_val != 'TOI'
-        puts "Setting TOI.." if OPTIONS[:verbose]
-        execute_with_retry(connection,"SET GLOBAL wsrep_OSU_method='TOI'")
-      else
-        puts "Not setting TOI: already using TOI"
-      end
-    rescue Mysql::Error => e
-      puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
-      exit
-    end
-    putsnl '.'
-    begin
-      cur_val = execute_with_retry(connection, "SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
-      if cur_val != 'TOI'
-        puts "Setting Local TOI.."
-        execute_with_retry(connection,"SET wsrep_OSU_method='TOI'")
-      end
-    rescue Mysql::Error => e
-      puts "Error occured setting local wsrep_OSU_method='TOI' : #{e.message}"
-      exit
-    end
+    
     
     #now we need to wait until the wsrep_local_state = 4
     in_sync = false
@@ -372,6 +350,31 @@ class Server
         exit
       end
     end
+    
+    begin
+      cur_val = execute_with_retry(connection,"SHOW GLOBAL VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      if cur_val != 'TOI'
+        puts "Setting TOI.." if OPTIONS[:verbose]
+        execute_with_retry(connection,"SET GLOBAL wsrep_OSU_method='TOI'")
+      else
+        puts "Not setting TOI: already using TOI"
+      end
+    rescue Mysql::Error => e
+      puts "Error occured setting wsrep_OSU_method='TOI' : #{e.message}"
+      exit
+    end
+    putsnl '.'
+    begin
+      cur_val = execute_with_retry(connection, "SHOW VARIABLES LIKE 'wsrep_OSU_method'").fetch_row[1]
+      if cur_val != 'TOI'
+        puts "Setting Local TOI.."
+        execute_with_retry(connection,"SET wsrep_OSU_method='TOI'")
+      end
+    rescue Mysql::Error => e
+      puts "Error occured setting local wsrep_OSU_method='TOI' : #{e.message}"
+      exit
+    end
+    
     connection.close
     sleep 2
     puts "done"
@@ -421,11 +424,11 @@ class Server
         return result
       rescue Mysql::Error => e
         puts "Error occured (#{e.errno}) executing #{statement} : #{e.message}"
-        if e.errno == 1047 || e.errno == 1213 # 'Unknown command' and 'deadlock'
+        if e.errno == 1047 || e.errno == 1213 || e.errno == 1205 # 'Unknown command' and 'deadlock' and 'Lock wait timeout'
           retry_sql = true
           puts "retrying..."
           retried = true
-          sleep 1
+          sleep 5
         else
           exit
         end
