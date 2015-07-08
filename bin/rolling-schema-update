@@ -380,6 +380,18 @@ class Server
     puts "done"
   end
   
+  def disconnect
+    begin
+      unless @connection.nil?
+        @connection.close
+        @connection = nil
+      end
+    rescue Exception=>e
+      puts "Error disconnecting: #{e.message}"
+      @connection = nil
+    end
+  end
+  
   def execute(statements)
     putsnl "#{@name}: executing"
     
@@ -684,6 +696,7 @@ begin
         server.execute statements.rolling_statements
         server.resync
         server.leave_maintenance
+        server.disconnect
       ensure
         
       end
