@@ -669,6 +669,17 @@ servers.sort! { |a, b|
   end
 }
 
+unless OPTIONS[:notfirst].nil?
+  if servers[0].name == OPTIONS[:notfirst]
+    puts "The first server (#{servers[0].name}) is not allowed to run first"
+    tmp_svr = servers[0]
+    servers[0] = servers[1]
+    servers[1] = tmp_svr
+  else
+    puts "The first server (#{servers[0].name}) is ok to run first"
+  end
+end
+
 memcache_server = nil
 unless OPTIONS[:memcache_servers].nil? || OPTIONS[:memcache_key].nil?
   memcache_options = {
