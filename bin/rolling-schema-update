@@ -45,7 +45,7 @@ class Server
         line.gsub!("   ", "\t") #new maxadmin uses spaces.. lets convert back to tabs...
         line = line.squeeze("\t").split("\t")
         #puts line.inspect
-        
+        next if line[1].nil? || line[2].nil? #ignore lines without keys/values
         key = line[1].strip
         value = line[2].strip
         #cleanup key
