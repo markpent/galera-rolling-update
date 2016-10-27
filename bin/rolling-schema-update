@@ -42,11 +42,12 @@ class Server
         cur_server = Server.new(line)
         servers << cur_server
       elsif !cur_server.nil?
+        line.gsub!("   ", "\t") #new maxadmin uses spaces.. lets convert back to tabs...
         line = line.squeeze("\t").split("\t")
         #puts line.inspect
         
-        key = line[1]
-        value = line[2]
+        key = line[1].strip
+        value = line[2].strip
         #cleanup key
         pos = key.index(':')
         next if pos.nil?
