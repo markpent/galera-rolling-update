@@ -125,6 +125,19 @@ class Server
     end
     @statuses << 'Maintenance'
     @statuses.uniq!
+    unless OPTIONS[:cmd_maintenance_on].nil?
+      cmd = OPTIONS[:cmd_maintenance_on].to_s.gsub("[SERVERNAME]", @name)
+      putsnl "Running external command #{cmd}.."
+      eresult = %x[#{cmd}]
+      if $?.to_i == 0
+        putsnl "..done.."
+      else
+        puts eresult
+        exit
+      end
+    end
+    
+    
     #sleep to give maxScale a chance to re-poll servers and re-assign roles
     for i in 0...10
       putsnl "."
@@ -142,6 +155,19 @@ class Server
       exit
     end
     @statuses.delete('Maintenance')
+    
+    unless OPTIONS[:cmd_maintenance_off].nil?
+      cmd = OPTIONS[:cmd_maintenance_off].to_s.gsub("[SERVERNAME]", @name)
+      putsnl "Running external command #{cmd}.."
+      eresult = %x[#{cmd}]
+      if $?.to_i == 0
+        putsnl "..done.."
+      else
+        puts eresult
+        exit
+      end
+    end
+    
     #sleep to give maxScale a chance to re-poll servers and re-assign roles
     for i in 0...10
       putsnl "."
